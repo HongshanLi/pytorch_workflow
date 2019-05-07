@@ -10,8 +10,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
+seed = 999
+np.random.seed(seed)
+
 class PressToAmp(Dataset):
-    def __init__(self, data_dir, file_names):
+    def __init__(self, data_dir, file_names, purpose='train'):
         self.data = []
         for file_name in file_names:
             data_path = os.path.join(data_dir, file_name)
@@ -31,7 +34,6 @@ class PressToAmp(Dataset):
         rpm = self.data[:, 0] / 10000.0
         rpm = rpm.reshape(-1, 1)
         pressure = self.data[:, 35:]
-        print(rpm.shape, pressure.shape)
         self.features = np.concatenate([rpm, pressure], axis=1)
     
         # targets is the average pressure on 33 blades
@@ -39,44 +41,30 @@ class PressToAmp(Dataset):
         self.targets = np.sum(self.targets, axis=1, keepdims=True)/33.0
         
         # keep 10% for validation and 10% for test
-        self.purpose = None
+        self.purpose = purpose
         l = self.__len__()
-        self.train_l = math.floor(l*0.8)
-        self.val_l = math.floor(l*0.1)
-        self.test_l = math.floor(l*0.1)
+        tr= math.floor(l*0.8)
+        v= math.floor(l*0.1)
+        te = math.floor(l*0.1)
+
+        if self.purpose == "train":
+            self.features = self.features[:tr]
+            self.targets = self.targets[:tr]
+        elif self.purpose == "validate":
+            self.features = self.features[tr:tr+v]
+            self.targets = self.targets[tr:tr+v]
+        elif self.purpose == "test":
+            self.features = self.features[tr+v:tr+v+te]
+            self.targets = self.targets[tr+v:tr+v+te]
+        else:
+            raise ValueError("purpose must be train, validate, or test")
 
     def __len__(self):
-        if self.purpose:
-            return len(self.targets_sub)
-        else:
-            return len(self.data)
+        return len(self.features)
 
     def __getitem__(self, idx):
-        return self.features_sub[idx], self.targets_sub[idx]
+        return self.features[idx], self.targets[idx]
 
-    def train(self):
-        self.purpose = "train"
-        tr = self.train_l
-        self.features_sub = self.features[:tr]
-        self.targets_sub = self.targets[:tr]
-        return self
-
-    def validate(self):
-        self.purpose = "validate"
-        tr=self.train_l
-        v = self.val_l
-        self.features_sub = self.features[tr:tr+v]
-        self.targets_sub = self.targets[tr:tr+v]
-        return self
-
-    def test(self):
-        self.purpose = "test"
-        tr=self.train_l
-        v=self.val_l
-        t=self.test_l
-        self.features_sub = self.features[tr+v:tr+v+t]
-        self.targets_sub = self.targets[tr+v:tr+v+t]
-        return self
 
 class Model(nn.Module):
     def __init__(self, hidden_size):
@@ -91,12 +79,12 @@ class Model(nn.Module):
         self.layers.append(
             nn.Sequential(nn.Linear(10501, hidden_size[0]),
             nn.BatchNorm1d(hidden_size[0]),
-            nn.ReLU()))
+            nn.Sigmoid()))
         for i in range(len(hidden_size) - 1):
             self.layers.append(
                 nn.Sequential(nn.Linear(hidden_size[i], hidden_size[i+1]),
                 nn.BatchNorm1d(hidden_size[i+1]),
-                nn.ReLU()))
+                nn.Sigmoid()))
 
         self.layers.append(
             nn.Linear(hidden_size[-1], 1)
@@ -109,9 +97,26 @@ class Model(nn.Module):
         return x
 
 class Trainer(object):
-    def __init__(self, dataset, model, batch_size, epochs):
-        self.dataset = dataset
-        self.batch_size = batch_size
+    def __init__(self, dataset_train, dataset_val,
+        dataset_test, model, batch_size, epochs):
+
+        print("Size of training set is:{}".format(
+            dataset_train.__len__()))
+
+        print("Size of validation set is:{}".format(
+            dataset_val.__len__()))
+
+        print("Size of testing set is:{}".format(
+            dataset_test.__len__()))
+
+        self.train_loader = DataLoader(dataset_train,
+            batch_size=batch_size, shuffle=True, num_workers=2)
+
+        self.val_loader = DataLoader(dataset_val,
+            batch_size=batch_size*10, shuffle=True, num_workers=2)
+
+        self.test_loader = DataLoader(dataset_test,
+            batch_size=batch_size*10, shuffle=True, num_workers=2)
 
         # load model
         self.model = model
@@ -133,15 +138,12 @@ class Trainer(object):
         self.optimizer = optim.Adam(self.model.parameters())
 
     def train(self):
-        data_train = self.dataset.train()
-        self.train_loader = DataLoader(
-            data_train, batch_size=self.batch_size, num_workers=2)
-
         for epoch in range(1, self.epochs+1):
             self.train_one_epoch(epoch)
-            #self.validate(epoch)
+            self.validate(epoch)
     
     def train_one_epoch(self, epoch):
+        self.model.train()
         for step, (features, target) in enumerate(self.train_loader):
             features = features.to(self.device)
             target = target.to(self.device)
@@ -157,21 +159,45 @@ class Trainer(object):
                 # compute average error (relative to target)
                 error = torch.abs(output - target) / target 
                 error = torch.sum(error) / len(error)
-                error = error * 100
                 error = error.detach().cpu().item()
+                loss = loss.detach().cpu().item()
                 
-                message = "Epoch: {}, Step: {}, Error: {:0.2f}%".format(
-                    epoch, step, error)
+                message = "Epoch: {}, Step: {}, Loss: {:0.3f}, Error: {:0.2f}%".format(
+                    epoch, step, loss, error*100)
                 print(message)
+
+    def validate(self, epoch):
+        self.model.eval()
+        val_error = []
+        for features, target in self.val_loader:
+            features = features.to(self.device)
+            target = target.to(self.device)
+
+            output = self.model(features)
+            error = torch.abs(output - target) / target 
+            error = torch.sum(error) / len(error)
+            error = error*100
+            error = error.detach().cpu().item()
+            val_error.append(error)
+        
+        val_error = sum(val_error) / len(val_error)
+        message ="Epoch: {}, Validation Error: {:0.2f}%".format(
+            epoch, val_error)
+        print(message)
+    
 
     def compute_loss(self, output, target):
         loss = F.mse_loss(output, target)
         return loss
 
-model = Model([5000, 2500, 1200, 600, 300, 100, 50])
+if __name__=="__main__":
+    model = Model([1000, 100, 10])
+    data_dir = "/scr1/li108/data/press_to_amp/"
+    file_names = ["HL_CL1_withair_dec1_data.mat"]
+    dataset_train = PressToAmp(data_dir, file_names, 'train')
+    dataset_val = PressToAmp(data_dir, file_names, 'validate')
+    dataset_test = PressToAmp(data_dir, file_names, 'test')
 
-data_dir = "/scr1/li108/data/press_to_amp/"
-file_names = ["HL_CL1_withair_dec1_data.mat"]
-dataset = PressToAmp(data_dir, file_names)
-trainer = Trainer(dataset, model, 20, 20)
-trainer.train()
+    trainer = Trainer(dataset_train,dataset_val,dataset_test,
+         model, 10, 1)
+    trainer.train()
