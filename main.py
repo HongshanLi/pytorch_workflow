@@ -155,7 +155,7 @@ class Trainer(object):
             loss.backward()
             self.optimizer.step()
 
-            if step % 10 == 0:
+            if step % 50 == 0:
                 # compute average error (relative to target)
                 error = torch.abs(output - target) / target 
                 error = torch.sum(error) / len(error)
@@ -192,12 +192,12 @@ class Trainer(object):
 
 if __name__=="__main__":
     model = Model([1000, 100, 10])
-    data_dir = "/scr1/li108/data/press_to_amp/"
+    data_dir = "/content/drive/My Drive/data/press_to_amp"
     file_names = ["HL_CL1_withair_dec1_data.mat"]
     dataset_train = PressToAmp(data_dir, file_names, 'train')
     dataset_val = PressToAmp(data_dir, file_names, 'validate')
     dataset_test = PressToAmp(data_dir, file_names, 'test')
 
     trainer = Trainer(dataset_train,dataset_val,dataset_test,
-         model, 10, 1)
+         model, 32, 50)
     trainer.train()
