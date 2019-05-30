@@ -11,6 +11,9 @@
     print_step: num of step to print progess
 
 """
+# automatically add ckp_dir to .gitignore
+# automatically add log_dir to .gitignore 
+
 def main():
     train_dataset = MyDataset('train')
     val_dataset = MyDataset('validate')
